@@ -1,7 +1,3 @@
-# bittorrent
-
-
-
 ## BitTorrent Client
 
 Collaborative project. I developed the project design, and I wrote the peer protocol (peermanager.py, peer.py) section and worked on bittorrent.py.
@@ -12,4 +8,6 @@ Collaborative project. I developed the project design, and I wrote the peer prot
 bitarray
 numpy
 bencode.py
+pytimerfd
+urllib3
 ```
