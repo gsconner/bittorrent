@@ -9,7 +9,7 @@ from bitarray import bitarray
 
 from peer import Peer
 import strategy
-import filesystem
+import torrent
 
 class PeerManager:
     peers = {}
@@ -23,7 +23,7 @@ class PeerManager:
     requestdelta = timedelta(seconds=10)
 
     bf = bitarray
-    fs: filesystem.FileSystem
+    fs: torrent.Torrent
 
     pieces = []
 
@@ -42,7 +42,7 @@ class PeerManager:
         bits =  ""
         for i in range(0, fs.piece_count):
             self.pieces.append(strategy.Piece(i))
-            if fs.is_piece_full(i):
+            if fs.verify_piece(i):
                 bits += '1'
             else:
                 bits += '0'
@@ -211,7 +211,7 @@ class PeerManager:
             self.pieces[index].recvBlock((index, begin, len(data)))
 
             if self.pieces[index].downloaded() == 1:
-                if self.fs.is_piece_full(index):
+                if self.fs.verify_piece(index):
                     #print(index, 'verified')
                     self.pieces[index].verified()
                     self.bf[index] = 1
@@ -239,7 +239,7 @@ class PeerManager:
         self.requests += 1
         piece = strategy.randomPiece(peerobj.bf, self.pieces)
         if piece != None:
-            blocks = self.fs.get_next_blocks_in_piece(math.ceil(self.fs.piece_length / 16384), piece.index)
+            blocks = self.fs.get_free_blocks_in_piece(piece.index)
             piece.downloading(peerobj, blocks)
             #print('Requesting', piece.index, 'from', peerobj.peer_ip)
             for block in blocks:

@@ -1,4 +1,3 @@
-import os
 import sys
 import socket
 import select
@@ -9,7 +8,7 @@ import random
 import threading
 
 import peermanager
-from filesystem import FileSystem
+from torrent import Torrent
 from torrentfile import TorrentFile
 from tracker import Tracker, HTTPTracker
 from peer import Peer
@@ -24,29 +23,48 @@ def connect_to_peer(peer):
 
 if __name__ == "__main__":
     if (len(sys.argv) < 2):
-        sys.exit("Use: bittorrent.py [.torrent file here] [port (optional)]")
+        sys.exit("Usage: bittorrent.py <.torrent file> [port]")
 
+    # torrent file path
     path = sys.argv[1]
+    if (path.endswith('.torrent') == False):
+        sys.exit("Must be a path to a torrent file")
 
+    # port
     port = 0
     if (len(sys.argv) > 2):
         port = int(sys.argv[2])
 
-    if (path.endswith('.torrent') == False):
-        sys.exit("Use: bittorrent.py [.torrent file here] [port (optional)]")
-
+    # Load bencoded data from torrent file
     torrent_file = TorrentFile(path)
-    #print(f'TorrentFile: {repr(torrent_file)}')
-    #print(f'Info Hash: {torrent_file.info_hash.hex()}')
-    #print(len(torrent_file.info_hash))
 
-    #peer_id = b'-Rn4829-948302039483'
+    # Create hash list
+    pieces = torrent_file.info['pieces']
+    hashes = []
+    for x in range (0, len(pieces),20):
+        temp = bytes()
+        for y in range (x, x + 20):
+            val = pieces[y] & 0xff
+            val = struct.pack("B",val)
+            temp = temp + val
+        hashes.append(temp)
+    
+    # Initialize torrent
+    if 'files' in torrent_file.info:
+        fs = Torrent(torrent_file.info['piece length'], hashes, torrent_file.info['files'])
+    else: 
+        fs = Torrent(torrent_file.info['piece length'], hashes, [dict(length = torrent_file.info['length'], path = torrent_file.info['name'])])
+
+    # Check local files
+    fs.check_local_files()
+
+    # Generate Peer ID
     peer_id = '-Rn4829-'
     for x in range(0,12):
         peer_id += str(random.randint(0,9))
     peer_id = bytes(peer_id, 'ascii')
 
-    # Seting up server
+    # Set up TCP server
     fileno_to_socket = {}
 
     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -57,21 +75,7 @@ if __name__ == "__main__":
     ep.register(sys.stdin.fileno(), select.EPOLLIN)
     ep.register(s.fileno(), select.EPOLLIN)
 
-    #Init filesystem
-    #print('Initializing filesystem...')
-    pieces = torrent_file.info['pieces']
-    hashes = []
-
-    for x in range (0, len(pieces),20):
-        temp = bytes()
-        for y in range (x, x + 20):
-            val = pieces[y] & 0xff
-            val = struct.pack("B",val)
-            temp = temp + val
-        hashes.append(temp)
-    
-    fs = FileSystem(torrent_file.info['length'], torrent_file.info['piece length'], hashes, torrent_file.info['name'])
-
+    # Initialize peer manager
     pm = peermanager.PeerManager(torrent_file.info_hash, peer_id, fs)
 
     tracker = Tracker.tracker_type(torrent_file.announce)(torrent_file, peer_id, 6881)
@@ -111,8 +115,8 @@ if __name__ == "__main__":
                 args = re.split(' +', l)
                 if len(args) == 1:
                     if args[0] == "print\n":
+                        print(fs)
                         pm.print()
-                        fs.print()
                     elif args[0] == "exit\n":
                         exit()
                     else:
