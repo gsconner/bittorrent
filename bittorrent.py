@@ -25,12 +25,12 @@ if __name__ == "__main__":
     if (len(sys.argv) < 2):
         sys.exit("Usage: bittorrent.py <.torrent file> [port]")
 
-    # torrent file path
+    # arg1 = torrent file path
     path = sys.argv[1]
     if (path.endswith('.torrent') == False):
         sys.exit("Must be a path to a torrent file")
 
-    # port
+    # arg2 = port
     port = 0
     if (len(sys.argv) > 2):
         port = int(sys.argv[2])
@@ -78,38 +78,18 @@ if __name__ == "__main__":
     # Initialize peer manager
     pm = peermanager.PeerManager(torrent_file.info_hash, peer_id, fs)
 
+    # Initialize tracker
     tracker = Tracker.tracker_type(torrent_file.announce)(torrent_file, peer_id, 6881)
-    #print(f'Tracker: {repr(tracker)}')
-    #if tracker.initilized:
-        #print(f'Peers: {tracker.peers}')
     for peer in tracker.peers:
         t = threading.Thread(target=connect_to_peer, args=(peer,))
         t.start()
-    
-    #read_peers, write_peers = peer_select(tracker.peers)
-
-    #print(f'Read Peers: {read_peers}')
-    #print(f'Write Peers: {write_peers}')
-
-    #Peer.context['peer_id'] = peer_id
-    #print(tracker.peers[0].context)
-
-    #peer = Peer('test', '127.0.0.1', 12345)
-    #peer.connect()
-    #peer_list = [peer]
-
-    #_ = input('Press enter to continue...')
-
-    # read_peers, write_peers = peer_select(peer_list)
-    # print(f'Read Peers: {read_peers}')
-    # print(f'Write Peers: {write_peers}')
 
     tracker_update_timer = timerfd.create(timerfd.CLOCK_REALTIME,0)
     timerfd.settime(tracker_update_timer,0,30,0)
-    ep.register(tracker_update_timer, select.EPOLLIN) #Register tracker update timer
+    ep.register(tracker_update_timer, select.EPOLLIN)
 
     while True:
-        for fileno, eventmask in ep.poll(-1): #Listen to Epoll
+        for fileno, eventmask in ep.poll(-1):
             if fileno == sys.stdin.fileno():
                 l = sys.stdin.readline()
                 args = re.split(' +', l)
@@ -130,7 +110,7 @@ if __name__ == "__main__":
                         print("Invalid syntax")
                 else:
                     print("Invalid syntax")
-            elif fileno == s.fileno(): #Another new peer trying to connect!
+            elif fileno == s.fileno():
                 ps, _ = s.accept()
                 ep.register(ps.fileno(), select.EPOLLIN)
                 fileno_to_socket[ps.fileno()] = ps
@@ -140,20 +120,18 @@ if __name__ == "__main__":
                         t = threading.Thread(target=connect_to_peer, args=(peer,))
                         t.start()
                 timerfd.settime(tracker_update_timer,0,30,0)
-            else: #Existing Peer!
+            else: # Message from existing peer
                 ps = fileno_to_socket[fileno]
                 try:
                     message = ps.recv(17000)
                     if len(message) == 0:
-                        #print('Peer', fileno, 'dropped connection')
                         ep.unregister(fileno)
                         del fileno_to_socket[fileno]
                         pm.dropPeer(ps)
                     else:
                         pm.recvMessage(message, ps)
                 except ConnectionResetError:
-                    #print('Peer', fileno, 'reset connection')
                     ep.unregister(fileno)
                     del fileno_to_socket[fileno]
                     pm.dropPeer(ps)
-        pm.update() # pm update has to be called every frame because it does other things besides sending keepalives
+        pm.update()

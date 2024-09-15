@@ -144,6 +144,8 @@ class Torrent:
         return self.piece_list[index].get_block(begin, length)
     
     def get_free_blocks_in_piece(self, index: int, num_blocks=None):
+        if index > self.piece_count or index < 0:
+            raise ValueError(f"Index out of bounds: index={index}, piece_count={self.piece_count}")
         if num_blocks == None:
             num_blocks = math.ceil(self.piece_length / BLOCK_SIZE)
             

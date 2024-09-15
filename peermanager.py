@@ -262,13 +262,9 @@ class PeerManager:
         for field in data:
             message += field
 
-        #print('Sending', message, 'to', peerobj.s.fileno())
         try:
             peerobj.s.send(message)
-        except Exception:
-            #print("Could not send to", peerobj.peer_ip)
-            self.dropPeer(peerobj.s)
-        except timeout:
+        except socket.timeout:
             self.dropPeer(peerobj.s)
 
     def recvMessage(self, message, ps):
