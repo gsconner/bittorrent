@@ -29,7 +29,7 @@ class Tracker():
     ip = None
     # Do not use this super class, use HTTPTracker for now
 
-    def __init__(self, torrent_file: TorrentFile, peer_id: str, port: int) -> None:
+    def __init__(self, torrent_file: TorrentFile, peer_id: bytes, port: int) -> None:
         self.torrent_file = torrent_file
         self.peer_id = peer_id
         self.port = port
@@ -58,7 +58,7 @@ class Tracker():
 
 
 class HTTPTracker(Tracker):
-    def __init__(self, torrent_file: TorrentFile, peer_id: str, port: int) -> None:
+    def __init__(self, torrent_file: TorrentFile, peer_id: bytes, port: int) -> None:
         super().__init__(torrent_file, peer_id, port)
         if self.request({'event': 'started'}, 5):
             self.initilized = True
@@ -181,7 +181,7 @@ class UDPTracker(Tracker):
     tracker_port: int
     s: socket.socket
 
-    def __init__(self, torrent_file: TorrentFile, peer_id: str, port: int) -> None:
+    def __init__(self, torrent_file: TorrentFile, peer_id: bytes, port: int) -> None:
         super().__init__(torrent_file, peer_id, port)
         self.s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         # parst udp://host:port
@@ -200,12 +200,12 @@ class UDPTracker(Tracker):
 
 
     def request(self, params: dict, timeout: int = 0) -> bool:
-        if not timeout <= 0:
-            print('UDPTracker: Warning: timeout ignored as UDP tracker protocol defines timeout')
+        #if not timeout <= 0:
+            #print('UDPTracker: Warning: timeout ignored as UDP tracker protocol defines timeout')
         
         # connect
         if self.connection_id == 0 or time.time() - self.connection_id_time > 3600:
-            print('UDPTracker: Connecting to tracker')
+            #print('UDPTracker: Connecting to tracker')
             for i in range(0, 9):
                 self._connect_request(i)
                 response = self._udp_recv(15 * (2 ** i))
@@ -296,7 +296,7 @@ class UDPTracker(Tracker):
         if 'port' in params:
             port = params['port']
         
-        data += struct.pack('!20s20sqqq', info_hash, peer_id.encode(encoding=self.torrent_file.encoding), downloaded, left, uploaded)
+        data += struct.pack('!20s20sqqq', info_hash, str(peer_id).encode(encoding=self.torrent_file.encoding), downloaded, left, uploaded)
         data += struct.pack('!iIiih', event, ip, key, num_want, port)
         self.s.send(data)
     
