@@ -51,9 +51,18 @@ if __name__ == "__main__":
     
     # Initialize torrent
     if 'files' in torrent_file.info:
-        fs = Torrent(torrent_file.info['piece length'], hashes, torrent_file.info['files'])
+        files = torrent_file.info['files']
+        directory = path.rstrip('.torrent')
+        for file in files:
+            file_path = file['path']
+            if type(file_path) != str:
+                file['path'] = [directory, *file_path]
+            else:
+                file['path'] = [directory, file_path]
     else: 
-        fs = Torrent(torrent_file.info['piece length'], hashes, [dict(length = torrent_file.info['length'], path = torrent_file.info['name'])])
+        files = [dict(length = torrent_file.info['length'], path = torrent_file.info['name'])]
+
+    fs = Torrent(torrent_file.info['piece length'], hashes, files)
 
     # Check local files
     fs.check_local_files()
@@ -80,6 +89,7 @@ if __name__ == "__main__":
 
     # Initialize tracker
     tracker = Tracker.tracker_type(torrent_file.announce)(torrent_file, peer_id, 6881)
+    tracker.start_connection()
     for peer in tracker.peers:
         t = threading.Thread(target=connect_to_peer, args=(peer,))
         t.start()
@@ -115,7 +125,7 @@ if __name__ == "__main__":
                 ep.register(ps.fileno(), select.EPOLLIN)
                 fileno_to_socket[ps.fileno()] = ps
             elif fileno == tracker_update_timer:
-                if tracker.request({}, 10):
+                if tracker.contact({}):
                     for peer in tracker.peers:
                         t = threading.Thread(target=connect_to_peer, args=(peer,))
                         t.start()

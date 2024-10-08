@@ -4,6 +4,7 @@ import urllib3
 import bencode
 import time
 import struct
+import logging
 
 from torrentfile import TorrentFile
 from peer import Peer
@@ -13,9 +14,7 @@ class Tracker():
     torrent_file: TorrentFile
     interval: int
     min_interval: int
-    tracker_id: str
-    # tracker_address: str
-    # tracker_port: int
+    announce_list: list
     complete: int
     incomplete: int
     # following used for sending requests
@@ -34,6 +33,14 @@ class Tracker():
         self.peer_id = peer_id
         self.port = port
         self.left = torrent_file.info['piece length'] * len(torrent_file.info['pieces'])
+        self.announce_list = []
+        if torrent_file.announce_list is None:
+            self.announce_list.append(torrent_file.announce)
+        else:
+            for announce in torrent_file.announce_list:
+                self.announce_list.append(announce[0])
+        logging.basicConfig(filename='tracker.log', level=logging.INFO)
+        self.logger = logging.getLogger(__name__)
 
     def __repr__(self) -> str:
         ret = 'Tracker('
@@ -60,10 +67,19 @@ class Tracker():
 class HTTPTracker(Tracker):
     def __init__(self, torrent_file: TorrentFile, peer_id: bytes, port: int) -> None:
         super().__init__(torrent_file, peer_id, port)
-        if self.request({'event': 'started'}, 5):
-            self.initilized = True
 
-    def request(self, params: dict, timeout: int) -> bool:
+    def start_connection(self):
+        if self.contact({'event': 'started'}):
+            self.initilized = True
+    
+    def contact(self, params: dict) -> bool:
+        for announce in self.announce_list:
+            if self.request(announce, params, 5):
+                return True
+            
+        return False
+
+    def request(self, announce: str, params: dict, timeout: int) -> bool:
         if 'info_hash' not in params:
             params['info_hash'] = self.torrent_file.info_hash
         if 'peer_id' not in params:
@@ -85,22 +101,21 @@ class HTTPTracker(Tracker):
         
         # send request
         try:
-            r = HTTPTracker._http_request(self.torrent_file.announce, params, timeout)
+            r = self._http_request(announce, params, timeout)
         except:
-            print('Tracker: request failed')
+            self.logger.info('Request failed')
             return False
         try:
-            # print(r)
             data = bencode.decode(r)
         except Exception as e:
-            print('Tracker: Failed to decode response', e)
+            self.logger.info('Failed to decode response', e)
             return False
         if 'failure reason' in data:
-            print('Tracker: Tracker returns Failure')
-            print('Data: ', data)
+            self.logger.info('Tracker returns failure')
+            self.logger.info('Data: ', data)
             return False
         if 'warning message' in data:
-            print(data['warning message'])
+            self.logger.info(data['warning message'])
         if 'interval' in data:
             self.interval = data['interval']
         if 'min interval' in data:
@@ -122,15 +137,14 @@ class HTTPTracker(Tracker):
                         peer_obj = Peer(None, peer['ip'], peer['port'])
                     self.peers.append(peer_obj)
                 except ValueError as e:
-                    print('Tracker: Warning: Failed when parsing a peer: ', e)
-                    print('Peer: ', peer)
-                    print('Peer Object: ', peer_obj)
+                    self.logger.info('Warning: Failed when parsing a peer: ', e)
+                    self.logger.info('Peer: ', peer)
+                    self.logger.info('Peer Object: ', peer_obj)
                     continue
 
         return True
     
-    @staticmethod
-    def _http_request(url: str, params: dict, timeout: int) -> bool:
+    def _http_request(self, url: str, params: dict, timeout: int) -> bool:
         server_host = urllib3.util.parse_url(url).host
         server_port = urllib3.util.parse_url(url).port
         url_path = urllib3.util.parse_url(url).path
@@ -142,7 +156,7 @@ class HTTPTracker(Tracker):
         try:
             s.connect((server_host, server_port))
         except:
-            print('Tracker: Failed to connect to tracker')
+            self.logger.info('Failed to connect to tracker')
             return False
         # send request
         request = 'GET ' + url_path + '?' + url_query + ' HTTP/1.1\r\n'
@@ -156,7 +170,7 @@ class HTTPTracker(Tracker):
             try:
                 data = s.recv(1024)
             except:
-                print('Tracker: Failed to receive response')
+                self.logger.info('Failed to receive response')
                 return False
             if not data:
                 break
@@ -165,8 +179,8 @@ class HTTPTracker(Tracker):
         # get status code
         status_code = int(response.split(b' ')[1])
         if status_code != 200:
-            print('Tracker: Status code is not 200')
-            print('Tracker: Response:', response)
+            self.logger.info('Status code is not 200')
+            self.logger.info('Response:', response)
         # strip headers by finding b'\r\n\r\n'
         response = response.split(b'\r\n\r\n', 1)[1]
         return response
@@ -177,85 +191,102 @@ class UDPTracker(Tracker):
 
     connection_id: int = 0
     connection_id_time: float
-    tracker_ip: str
-    tracker_port: int
     s: socket.socket
 
     def __init__(self, torrent_file: TorrentFile, peer_id: bytes, port: int) -> None:
         super().__init__(torrent_file, peer_id, port)
-        self.s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        # parst udp://host:port
-        self.tracker_ip = urllib3.util.parse_url(self.torrent_file.announce).host
-        self.tracker_port = urllib3.util.parse_url(self.torrent_file.announce).port
-        if self.tracker_port is None:
-            self.tracker_port = 6969
-        # set destination
-        self.s.connect((self.tracker_ip, self.tracker_port))
-        # send initial request
-        if self.request({'event': 'started'}):
-            self.initilized = True
-        else:
-            print('UDPTracker: Failed to initialize')
-            self.initilized = False
 
+    def start_connection(self):
+        self.logger.info('Starting initial connection')
+        return self.contact({'event': 'started'})
 
-    def request(self, params: dict, timeout: int = 0) -> bool:
+    def contact(self, params: dict) -> bool: 
+        id = 0
+        for announce in self.announce_list:
+            if self.request(id, announce, params):
+                return True
+            id += 1
+        
+        return False
+
+    def request(self, transaction_id: int, announce: str, params: dict, timeout: int = 0) -> bool:
+        self.logger.info(f'Sending request to {announce}')
         #if not timeout <= 0:
             #print('UDPTracker: Warning: timeout ignored as UDP tracker protocol defines timeout')
         
+        # set up socket
+        host = urllib3.util.parse_url(announce).host
+        port = urllib3.util.parse_url(announce).port
+        if port is None:
+            port = 6969
+        
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            s.connect((host, port))
+        except socket.gaierror as err:
+            self.logger.info(f'Invalid announce link {announce} {err}')
+            return False
+
         # connect
         if self.connection_id == 0 or time.time() - self.connection_id_time > 3600:
-            #print('UDPTracker: Connecting to tracker')
-            for i in range(0, 9):
-                self._connect_request(i)
-                response = self._udp_recv(15 * (2 ** i))
-                if response is None:
-                    print('UDPTracker: Timeout in connect')
-                    continue
-                if not self._connect_response(i, response):
-                    continue
-                break
-            else:
-                print('UDPTracker: Failed to connect to tracker')
+            if not self._connect(s, transaction_id):
+                self.logger.info('Failed to connect to tracker')
+                s.close()
                 return False
 
         # announce
-        for i in range(0, 9):
-            self._announce_request(i, params)
-            response = self._udp_recv(15 * (2 ** i))
-            if response is None:
-                print('UDPTracker: Timeout in announce')
-                continue
-            if not self._announce_response(i, response):
-                continue
-            break
-        else:
-            print('UDPTracker: Failed to announce to tracker')
+        if not self._announce(s, transaction_id, params):
+            self.logger.info('Failed to announce to tracker')
+            s.close()
+            return False
+        
+        s.close()
+        return True
+
+    def _connect(self, s: socket, transaction_id: int) -> bool:
+        self.logger.info('Connecting to tracker')
+        self._connect_request(s, transaction_id)
+        response = self._udp_recv(s, 15)
+        if response is None:
+            self.logger.info('Timeout in connect')
+            return False
+        if not self._connect_response(transaction_id, response):
+            self.logger.info('Bad response')
             return False
         
         return True
 
+    def _announce(self, s: socket, transaction_id: int, params: dict) -> None:
+        self._announce_request(s, transaction_id, params)
+        response = self._udp_recv(s, 15)
+        if response is None:
+            self.logger.info('Timeout in announce')
+            return False
+        if not self._announce_response(transaction_id, response):
+            return False
+        
+        return True
 
-    def _connect_request(self, transaction_id: int) -> None:
+    def _connect_request(self, s: socket, transaction_id: int) -> None:
         data = struct.pack('!qii', UDPTracker.PROTOCOL_ID, 0, transaction_id)
-        self.s.send(data)
+        s.send(data)
 
     def _connect_response(self, transaction_id: int, data: bytes) -> bool:
         if data is None:
-            print('UDPTracker: _connect_response: data is None, probably timeout')
+            self.logger.info('Data is None, probably timeout')
             return False
         if len(data) != 16:
-            print('UDPTracker: Invalid response length')
+            self.logger.info('Invalid response length')
             return False
         action, transaction_id_r, connection_id = struct.unpack('!iiq', data)
         if transaction_id_r != transaction_id or action != 0:
-            print('UDPTracker: Invalid action or transaction id')
+            self.logger.info(f'Invalid action or transaction id: transaction_id_r={transaction_id_r} transaction_id={transaction_id} action={action}')
             return False
         self.connection_id = connection_id
         self.connection_id_time = time.time()
         return True
     
-    def _announce_request(self, transaction_id: int, params: dict) -> None:
+    def _announce_request(self, s: socket, transaction_id: int, params: dict) -> None:
         data = struct.pack('!qii', self.connection_id, 1, transaction_id)
         
         info_hash = self.torrent_file.info_hash
@@ -298,18 +329,18 @@ class UDPTracker(Tracker):
         
         data += struct.pack('!20s20sqqq', info_hash, str(peer_id).encode(encoding=self.torrent_file.encoding), downloaded, left, uploaded)
         data += struct.pack('!iIiih', event, ip, key, num_want, port)
-        self.s.send(data)
+        s.send(data)
     
     def _announce_response(self, transaction_id: int, data: bytes) -> bool:
         if data is None:
-            print('UDPTracker: _announce_response: data is None, probably timeout')
+            self.logger.info('Data is None, probably timeout')
             return False
         if len(data) < 20:
-            print('UDPTracker: Invalid response length')
+            self.logger.info('Invalid response length')
             return False
         action, transaction_id_r, interval, leechers, seeders = struct.unpack('!iiiii', data[:20])
         if transaction_id_r != transaction_id or action != 1:
-            print('UDPTracker: Invalid action or transaction id')
+            self.logger.info(f'Invalid action or transaction id: transaction_id_r={transaction_id_r} transaction_id={transaction_id} action={action}')
             return False
         
         self.incomplete = leechers
@@ -317,7 +348,7 @@ class UDPTracker(Tracker):
         self.interval = interval
 
         if len(data) != 20 + 6 * (leechers + seeders):
-            print('UDPTracker: Invalid response length')
+            self.logger.info('Invalid response length')
             return False
 
         self.peers = []
@@ -328,11 +359,11 @@ class UDPTracker(Tracker):
             self.peers.append(peer_obj)
         return True
 
-    def _udp_recv(self, timeout: int) -> bytes:
-        self.s.settimeout(timeout)
+    def _udp_recv(self, s: socket, timeout: int) -> bytes:
+        s.settimeout(timeout)
         data = None
         try:
-            data = self.s.recv(4096)
+            data = s.recv(4096)
         except:
             pass
         return data
