@@ -10,23 +10,28 @@ from torrentfile import TorrentFile
 from peer import Peer
 
 class Tracker():
-    initilized = False
     torrent_file: TorrentFile
+    announce_list: list
+    tracker_url: str = None
+
     interval: int
     min_interval: int
-    announce_list: list
     complete: int
     incomplete: int
-    # following used for sending requests
     port: int
     peer_id: str
-    downloaded = 0 # modify on download/upload
+    downloaded = 0
     uploaded = 0
     left: int
     compact = 0
     no_peer_id = 0
     ip = None
-    # Do not use this super class, use HTTPTracker for now
+
+    PROTOCOL_ID: int = 0x41727101980
+    connection_id: int = 0
+    connection_id_time: float
+
+    logger: logging.Logger
 
     def __init__(self, torrent_file: TorrentFile, peer_id: bytes, port: int) -> None:
         self.torrent_file = torrent_file
@@ -39,7 +44,6 @@ class Tracker():
         else:
             for announce in torrent_file.announce_list:
                 self.announce_list.append(announce[0])
-        logging.basicConfig(filename='tracker.log', level=logging.INFO)
         self.logger = logging.getLogger(__name__)
 
     def __repr__(self) -> str:
@@ -48,38 +52,8 @@ class Tracker():
             ret += f'{key}={repr(value)}, '
         ret = ret[:-2] + ')'
         return ret
-
-    def request(self, params: dict, timeout: int) -> bool:
-        raise NotImplementedError
     
-    @staticmethod
-    def tracker_type(announce: str):
-        if announce.startswith('http://'):
-            return HTTPTracker
-        elif announce.startswith('udp://'):
-            return UDPTracker
-        elif announce.startswith('https://'):
-            raise NotImplementedError
-        else:
-            raise ValueError('Invalid tracker type')
-
-
-class HTTPTracker(Tracker):
-    def __init__(self, torrent_file: TorrentFile, peer_id: bytes, port: int) -> None:
-        super().__init__(torrent_file, peer_id, port)
-
-    def start_connection(self):
-        if self.contact({'event': 'started'}):
-            self.initilized = True
-    
-    def contact(self, params: dict) -> bool:
-        for announce in self.announce_list:
-            if self.request(announce, params, 5):
-                return True
-            
-        return False
-
-    def request(self, announce: str, params: dict, timeout: int) -> bool:
+    def request(self, params: dict) -> bool:
         if 'info_hash' not in params:
             params['info_hash'] = self.torrent_file.info_hash
         if 'peer_id' not in params:
@@ -98,24 +72,104 @@ class HTTPTracker(Tracker):
             params['no_peer_id'] = self.no_peer_id
         if 'ip' not in params and self.ip is not None:
             params['ip'] = self.ip
-        
-        # send request
+            
+        transaction_id = 0
+        if self.tracker_url is not None:
+            if self._contact_url(transaction_id, params, self.tracker_url):
+                 return True
+            transaction_id += 1
+        for announce in self.announce_list:
+            if self._contact_url(transaction_id, params, announce):
+                return True
+            transaction_id += 1
+        return False
+
+    def _http_request(self, announce: str, params: dict, timeout: int) -> bool:     
         try:
-            r = self._http_request(announce, params, timeout)
+            r = self._http_connect(announce, params, timeout)
         except:
             self.logger.info('Request failed')
             return False
         try:
             data = bencode.decode(r)
         except Exception as e:
-            self.logger.info('Failed to decode response', e)
+            self.logger.info(f'Received response has invalid format: {e}')
             return False
+        if not self._process_data(data):
+            return False
+        self.logger.info('Request succesful')
+        return True
+    
+    def _udp_request(self, transaction_id: int, announce: str, params: dict, timeout: int = 0) -> bool:
+        #if not timeout <= 0:
+            #print('UDPTracker: Warning: timeout ignored as UDP tracker protocol defines timeout')
+        
+        # set up socket
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        if self._connect_socket(s, announce, 6969):
+            # connect
+            if self.connection_id == 0 or time.time() - self.connection_id_time > 3600:
+                if not self._connect(s, transaction_id):
+                    s.close()
+                    return False
+
+            # announce
+            if not self._announce(s, transaction_id, params):
+                s.close()
+                return False
+            
+            s.close()
+            self.logger.info('Request succesful')
+            return True
+        else:
+            self.logger.info('Failed to connect to tracker')
+            return False
+    
+    def _http_connect(self, url: str, params: dict, timeout: int) -> bool:
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        s.settimeout(timeout)
+        if self._connect_socket(s, url, 80):
+            host = urllib3.util.parse_url(url).host
+            url_path = urllib3.util.parse_url(url).path
+            url_query = urllib.parse.urlencode(params)
+            s.settimeout(timeout)
+            # send request
+            request = 'GET ' + url_path + '?' + url_query + ' HTTP/1.1\r\n'
+            request += 'Host: ' + host + '\r\n'
+            request += 'Connection: close\r\n'
+            request += '\r\n'
+            s.send(request.encode())
+            # receive response
+            response = b''
+            while True:
+                try:
+                    data = s.recv(1024)
+                except Exception as e:
+                    self.logger.info(f'Failed to receive response: {e}')
+                    return False
+                if not data:
+                    break
+                response += data
+            s.close()
+            # get status code
+            status_code = int(response.split(b' ')[1])
+            if status_code != 200:
+                self.logger.info(f'Status code is not 200; Response: {response}')
+            # strip headers by finding b'\r\n\r\n'
+            response = response.split(b'\r\n\r\n', 1)[1]
+            return response
+        else:
+            self.logger.info('Could not connect to tracker')
+            return False
+        
+    def _process_data(self, data):
         if 'failure reason' in data:
-            self.logger.info('Tracker returns failure')
-            self.logger.info('Data: ', data)
+            msg = data['failure reason']
+            self.logger.info(f'Tracker failure: {msg}')
             return False
         if 'warning message' in data:
-            self.logger.info(data['warning message'])
+            msg = data['warning message']
+            self.logger.info(f'Tracker warning: {msg}')
         if 'interval' in data:
             self.interval = data['interval']
         if 'min interval' in data:
@@ -137,114 +191,10 @@ class HTTPTracker(Tracker):
                         peer_obj = Peer(None, peer['ip'], peer['port'])
                     self.peers.append(peer_obj)
                 except ValueError as e:
-                    self.logger.info('Warning: Failed when parsing a peer: ', e)
-                    self.logger.info('Peer: ', peer)
-                    self.logger.info('Peer Object: ', peer_obj)
-                    continue
-
+                    self.logger.info(f'Failed when parsing a peer: {e} Peer: {peer} Peer Object: {peer_obj}')
         return True
     
-    def _http_request(self, url: str, params: dict, timeout: int) -> bool:
-        server_host = urllib3.util.parse_url(url).host
-        server_port = urllib3.util.parse_url(url).port
-        url_path = urllib3.util.parse_url(url).path
-        url_query = urllib.parse.urlencode(params)
-        if server_port is None:
-            server_port = 80
-        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        s.settimeout(timeout)
-        try:
-            s.connect((server_host, server_port))
-        except:
-            self.logger.info('Failed to connect to tracker')
-            return False
-        # send request
-        request = 'GET ' + url_path + '?' + url_query + ' HTTP/1.1\r\n'
-        request += 'Host: ' + server_host + '\r\n'
-        request += 'Connection: close\r\n'
-        request += '\r\n'
-        s.send(request.encode())
-        # receive response
-        response = b''
-        while True:
-            try:
-                data = s.recv(1024)
-            except:
-                self.logger.info('Failed to receive response')
-                return False
-            if not data:
-                break
-            response += data
-        s.close()
-        # get status code
-        status_code = int(response.split(b' ')[1])
-        if status_code != 200:
-            self.logger.info('Status code is not 200')
-            self.logger.info('Response:', response)
-        # strip headers by finding b'\r\n\r\n'
-        response = response.split(b'\r\n\r\n', 1)[1]
-        return response
-
-
-class UDPTracker(Tracker):
-    PROTOCOL_ID: int = 0x41727101980
-
-    connection_id: int = 0
-    connection_id_time: float
-    s: socket.socket
-
-    def __init__(self, torrent_file: TorrentFile, peer_id: bytes, port: int) -> None:
-        super().__init__(torrent_file, peer_id, port)
-
-    def start_connection(self):
-        self.logger.info('Starting initial connection')
-        return self.contact({'event': 'started'})
-
-    def contact(self, params: dict) -> bool: 
-        id = 0
-        for announce in self.announce_list:
-            if self.request(id, announce, params):
-                return True
-            id += 1
-        
-        return False
-
-    def request(self, transaction_id: int, announce: str, params: dict, timeout: int = 0) -> bool:
-        self.logger.info(f'Sending request to {announce}')
-        #if not timeout <= 0:
-            #print('UDPTracker: Warning: timeout ignored as UDP tracker protocol defines timeout')
-        
-        # set up socket
-        host = urllib3.util.parse_url(announce).host
-        port = urllib3.util.parse_url(announce).port
-        if port is None:
-            port = 6969
-        
-        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        try:
-            s.connect((host, port))
-        except socket.gaierror as err:
-            self.logger.info(f'Invalid announce link {announce} {err}')
-            return False
-
-        # connect
-        if self.connection_id == 0 or time.time() - self.connection_id_time > 3600:
-            if not self._connect(s, transaction_id):
-                self.logger.info('Failed to connect to tracker')
-                s.close()
-                return False
-
-        # announce
-        if not self._announce(s, transaction_id, params):
-            self.logger.info('Failed to announce to tracker')
-            s.close()
-            return False
-        
-        s.close()
-        return True
-
     def _connect(self, s: socket, transaction_id: int) -> bool:
-        self.logger.info('Connecting to tracker')
         self._connect_request(s, transaction_id)
         response = self._udp_recv(s, 15)
         if response is None:
@@ -268,7 +218,7 @@ class UDPTracker(Tracker):
         return True
 
     def _connect_request(self, s: socket, transaction_id: int) -> None:
-        data = struct.pack('!qii', UDPTracker.PROTOCOL_ID, 0, transaction_id)
+        data = struct.pack('!qii', Tracker.PROTOCOL_ID, 0, transaction_id)
         s.send(data)
 
     def _connect_response(self, transaction_id: int, data: bytes) -> bool:
@@ -357,6 +307,30 @@ class UDPTracker(Tracker):
             ip = socket.inet_ntoa(struct.pack('!I', ip))
             peer_obj = Peer(None, ip, port)
             self.peers.append(peer_obj)
+        return True
+    
+    def _contact_url(self, transaction_id: int, params: dict, url: str) -> bool:
+        self.logger.info(f'Requesting tracker at {url}')
+        if url.startswith('http://'):
+            return self._http_request(url, params, 5)
+        elif url.startswith('udp://'):
+            return self._udp_request(transaction_id, url, params)
+        elif url.startswith('https://'):
+            raise NotImplementedError
+        else:
+            raise ValueError('Invalid tracker type')
+
+    def _connect_socket(self, s: socket, url: str, default_port: int) -> bool:
+        host = urllib3.util.parse_url(url).host
+        port = urllib3.util.parse_url(url).port
+        if port is None:
+            port = default_port
+        try:
+            s.connect((host, port))
+            self.tracker_url = url
+        except socket.gaierror as err:
+            self.logger.info(f'Invalid announce link {url} {err}')
+            return False
         return True
 
     def _udp_recv(self, s: socket, timeout: int) -> bytes:

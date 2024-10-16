@@ -6,11 +6,12 @@ import struct
 import timerfd
 import random
 import threading
+import logging
 
 import peermanager
 from torrent import Torrent
 from torrentfile import TorrentFile
-from tracker import Tracker, HTTPTracker
+from tracker import Tracker
 from peer import Peer
 
 def connect_to_peer(peer):
@@ -34,6 +35,10 @@ if __name__ == "__main__":
     port = 0
     if (len(sys.argv) > 2):
         port = int(sys.argv[2])
+
+    # Config logger
+    logging.basicConfig(filename='bittorrent.log', level=logging.INFO)
+    logging.info("Starting bittorrent")
 
     # Load bencoded data from torrent file
     torrent_file = TorrentFile(path)
@@ -88,8 +93,8 @@ if __name__ == "__main__":
     pm = peermanager.PeerManager(torrent_file.info_hash, peer_id, fs)
 
     # Initialize tracker
-    tracker = Tracker.tracker_type(torrent_file.announce)(torrent_file, peer_id, 6881)
-    tracker.start_connection()
+    tracker = Tracker(torrent_file, peer_id, 6881)
+    tracker.request({'event': 'started'})
     for peer in tracker.peers:
         t = threading.Thread(target=connect_to_peer, args=(peer,))
         t.start()
@@ -125,7 +130,7 @@ if __name__ == "__main__":
                 ep.register(ps.fileno(), select.EPOLLIN)
                 fileno_to_socket[ps.fileno()] = ps
             elif fileno == tracker_update_timer:
-                if tracker.contact({}):
+                if tracker.request({}):
                     for peer in tracker.peers:
                         t = threading.Thread(target=connect_to_peer, args=(peer,))
                         t.start()
