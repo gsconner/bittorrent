@@ -14,6 +14,16 @@ from torrentfile import TorrentFile
 from tracker import Tracker
 from peer import Peer
 
+def connect_to_tracker(announce_list, info_hash, peer_id, port, torrent_size, encoding) -> Tracker:
+    for announce in announce_list:
+            url = announce[0]
+            logging.info(f'Sending request to tracker {url}')
+            tracker = Tracker.create_tracker(url, info_hash, peer_id, port, encoding)
+            if tracker.make_request(torrent_size, 0, 0, False, 'started'):
+                logging.info("Request successful")
+                return tracker
+    return None
+
 def connect_to_peer(peer):
     #print('Found peer:', peer)
     ps = pm.connPeer(peer)
@@ -93,8 +103,12 @@ if __name__ == "__main__":
     pm = peermanager.PeerManager(torrent_file.info_hash, peer_id, fs)
 
     # Initialize tracker
-    tracker = Tracker(torrent_file, peer_id, 6881)
-    tracker.request({'event': 'started'})
+    if torrent_file.announce_list is not None:
+        tracker = connect_to_tracker(torrent_file.announce_list, torrent_file.info_hash, peer_id, 6881, fs.torrent_size, torrent_file.encoding)
+    else:
+        tracker = connect_to_tracker([[torrent_file.announce]], torrent_file.info_hash, peer_id, 6881, fs.torrent_size, torrent_file.encoding)
+    if tracker == None:
+        sys.exit("Failed to connect to tracker")
     for peer in tracker.peers:
         t = threading.Thread(target=connect_to_peer, args=(peer,))
         t.start()
@@ -130,7 +144,7 @@ if __name__ == "__main__":
                 ep.register(ps.fileno(), select.EPOLLIN)
                 fileno_to_socket[ps.fileno()] = ps
             elif fileno == tracker_update_timer:
-                if tracker.request({}):
+                if tracker.make_request(fs.torrent_size, 0, 0, False):
                     for peer in tracker.peers:
                         t = threading.Thread(target=connect_to_peer, args=(peer,))
                         t.start()
